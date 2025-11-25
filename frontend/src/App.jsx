@@ -292,7 +292,18 @@ function App() {
           // Escape special regex characters
           const escaped = content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
           const regex = new RegExp(`(${escaped})`, 'g')
-          html = html.replace(regex, '<mark class="diff-added">$1</mark>')
+          html = html.replace(regex, '<span class="diff-added">$1</span>')
+        }
+      }
+
+      // Highlight deleted content (shown with strikethrough)
+      for (const deletion of diff.deletions || []) {
+        const content = deletion.content.trim()
+        if (content && content.length > 3) {
+          // Escape special regex characters
+          const escaped = content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const regex = new RegExp(`(${escaped})`, 'g')
+          html = html.replace(regex, '<span class="diff-deleted">$1</span>')
         }
       }
     }
@@ -310,9 +321,18 @@ function App() {
       <div className="main-content">
         {/* Chat Panel */}
         <div className="chat-panel">
+          {/* Tool Status Banner */}
+          {toolStatus && (
+            <div className={`tool-banner tool-${toolStatus.toLowerCase().replace(/[^a-z]/g, '')}`}>
+              <div className="tool-badge">
+                <span className="tool-icon"></span>
+                <span className="tool-name">{toolStatus}</span>
+              </div>
+            </div>
+          )}
+
           <div className="panel-header">
             <h2>Chat</h2>
-            {toolStatus && <span className="tool-status">Running: {toolStatus}</span>}
           </div>
 
           <div className="message-list">
@@ -416,8 +436,27 @@ function App() {
                     .sig-row { display: flex; justify-content: space-between; margin: 20px 0; }
                     .sig-col { width: 45%; }
                     .sig-line { border: none; border-top: 1px solid #111; margin: 30px 0 5px 0; }
-                    .diff-added { background-color: #d4edda; border-radius: 2px; padding: 0 2px; }
-                    .diff-deleted { background-color: #f8d7da; text-decoration: line-through; border-radius: 2px; padding: 0 2px; }
+                    .diff-added {
+                      background-color: #22c55e;
+                      color: #ffffff;
+                      border-radius: 3px;
+                      padding: 2px 6px;
+                      margin: 0 2px;
+                      display: inline-block;
+                      font-weight: 500;
+                      box-shadow: 0 1px 3px rgba(34, 197, 94, 0.3);
+                    }
+                    .diff-deleted {
+                      background-color: #ef4444;
+                      color: #ffffff;
+                      text-decoration: line-through;
+                      border-radius: 3px;
+                      padding: 2px 6px;
+                      margin: 0 2px;
+                      display: inline-block;
+                      font-weight: 500;
+                      box-shadow: 0 1px 3px rgba(239, 68, 68, 0.3);
+                    }
                   </style>
                   </head><body><p>${parseLatex(currentDocument, diffData, showDiff)}</p></body></html>
                 `}
