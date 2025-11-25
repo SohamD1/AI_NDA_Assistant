@@ -83,14 +83,20 @@ function App() {
 
           // Handle tool events
           if (data.startsWith('[TOOL_EXECUTING:')) {
-            setToolStatus(data.slice(16, -1))
+            const toolName = data.slice(16, -1)
+            console.log('Tool executing:', toolName)
+            setToolStatus(toolName)
             continue
           }
           if (data.startsWith('[TOOL_RESULT:')) {
+            console.log('Tool result received')
             setToolStatus(null)
             continue
           }
           if (data.startsWith('[TOOL_START:')) {
+            const toolName = data.slice(12, -1)
+            console.log('Tool started:', toolName)
+            setToolStatus(toolName)
             continue
           }
 
@@ -321,7 +327,11 @@ function App() {
       <div className="main-content">
         {/* Chat Panel */}
         <div className="chat-panel">
-          {/* Tool Status Banner */}
+          <div className="panel-header">
+            <h2>Chat</h2>
+          </div>
+
+          {/* Tool Status Banner - Below header */}
           {toolStatus && (
             <div className={`tool-banner tool-${toolStatus.toLowerCase().replace(/[^a-z]/g, '')}`}>
               <div className="tool-badge">
@@ -330,10 +340,6 @@ function App() {
               </div>
             </div>
           )}
-
-          <div className="panel-header">
-            <h2>Chat</h2>
-          </div>
 
           <div className="message-list">
             {messages.length === 0 && (
