@@ -3,6 +3,7 @@
 import os
 import json
 import base64
+import difflib
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -28,6 +29,116 @@ MAX_HISTORY_LENGTH = 20  # Keep last 20 messages
 # In-memory conversation storage (per session)
 # In production, use Redis, database, or session storage
 conversations = {}
+
+# Store document history for diff highlighting (per session)
+document_history = {}
+
+
+def get_document_history(session_id: str) -> list:
+    """Get document version history for a session."""
+    if session_id not in document_history:
+        document_history[session_id] = []
+    return document_history[session_id]
+
+
+def add_document_version(session_id: str, latex_content: str) -> dict:
+    """
+    Add a new document version and compute diff from previous version.
+
+    Returns:
+        dict with 'content', 'diff', and 'version' keys
+    """
+    history = get_document_history(session_id)
+    version = len(history) + 1
+
+    diff_data = None
+    if history:
+        # Compute diff from previous version
+        previous = history[-1]["content"]
+        diff_data = compute_diff(previous, latex_content)
+
+    version_entry = {
+        "version": version,
+        "content": latex_content,
+        "diff": diff_data
+    }
+    history.append(version_entry)
+    return version_entry
+
+
+def compute_diff(old_text: str, new_text: str) -> dict:
+    """
+    Compute line-by-line diff between two LaTeX documents.
+
+    Returns:
+        dict with 'additions', 'deletions', and 'changes' lists
+    """
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+
+    differ = difflib.unified_diff(old_lines, new_lines, lineterm='')
+
+    additions = []
+    deletions = []
+    changes = []
+
+    # Parse unified diff output
+    old_line_num = 0
+    new_line_num = 0
+
+    for line in differ:
+        if line.startswith('@@'):
+            # Parse hunk header: @@ -start,count +start,count @@
+            import re
+            match = re.match(r'@@ -(\d+)', line)
+            if match:
+                old_line_num = int(match.group(1)) - 1
+            match = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
+            if match:
+                new_line_num = int(match.group(1)) - 1
+        elif line.startswith('-') and not line.startswith('---'):
+            old_line_num += 1
+            deletions.append({
+                "line": old_line_num,
+                "content": line[1:].rstrip('\n')
+            })
+        elif line.startswith('+') and not line.startswith('+++'):
+            new_line_num += 1
+            additions.append({
+                "line": new_line_num,
+                "content": line[1:].rstrip('\n')
+            })
+        elif not line.startswith('---') and not line.startswith('+++'):
+            old_line_num += 1
+            new_line_num += 1
+
+    # Find changed sections (sequential additions/deletions that are modifications)
+    # Group nearby additions and deletions as "changes"
+    for add in additions:
+        for dele in deletions:
+            # Use sequence matcher to find similar lines (modifications vs new content)
+            ratio = difflib.SequenceMatcher(None, dele["content"], add["content"]).ratio()
+            if ratio > 0.5:  # Lines are similar enough to be considered a modification
+                changes.append({
+                    "old_line": dele["line"],
+                    "new_line": add["line"],
+                    "old_content": dele["content"],
+                    "new_content": add["content"],
+                    "similarity": ratio
+                })
+
+    return {
+        "additions": additions,
+        "deletions": deletions,
+        "changes": changes,
+        "has_changes": len(additions) > 0 or len(deletions) > 0
+    }
+
+
+def clear_document_history(session_id: str):
+    """Clear document history for a session."""
+    if session_id in document_history:
+        del document_history[session_id]
 
 
 def get_conversation(session_id: str) -> list:
@@ -277,10 +388,19 @@ def stream():
                     if tool_block.name in ["generate_document", "apply_edits"]:
                         latex_content = tool_block.input.get("latex_content", "")
                         if latex_content:
+                            # Add to document history and compute diff
+                            version_data = add_document_version(session_id, latex_content)
+
                             # Send LaTeX content as a special event for the preview panel
                             # Base64 encode to avoid SSE parsing issues with newlines
                             encoded_latex = base64.b64encode(latex_content.encode('utf-8')).decode('utf-8')
                             yield f"data: [LATEX_DOCUMENT:{encoded_latex}]\n\n"
+
+                            # Send diff data if this is an edit (not first document)
+                            if version_data.get("diff") and version_data["diff"]["has_changes"]:
+                                diff_json = json.dumps(version_data["diff"])
+                                encoded_diff = base64.b64encode(diff_json.encode('utf-8')).decode('utf-8')
+                                yield f"data: [DIFF_DATA:{encoded_diff}]\n\n"
 
                     result = execute_tool(tool_block.name, tool_block.input)
                     tool_results.append({
@@ -322,6 +442,162 @@ def stream():
     )
 
 
+# JSON Schema for structured NDA information extraction (used without function calling)
+NDA_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "party_a": {
+            "type": "string",
+            "description": "Full legal name of the Disclosing Party"
+        },
+        "party_b": {
+            "type": "string",
+            "description": "Full legal name of the Receiving Party"
+        },
+        "effective_date": {
+            "type": "string",
+            "description": "The effective date of the agreement"
+        },
+        "purpose": {
+            "type": "string",
+            "description": "The specific reason for the NDA"
+        },
+        "is_mutual": {
+            "type": "boolean",
+            "description": "True if both parties disclose information"
+        },
+        "confidentiality_period": {
+            "type": "string",
+            "description": "Duration of confidentiality obligations"
+        },
+        "additional_terms": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Any additional terms or clauses mentioned"
+        }
+    },
+    "required": ["party_a"]
+}
+
+
+@app.route("/extract-structured", methods=["POST"])
+def extract_structured():
+    """
+    Extract structured information from text using JSON schema validation.
+    This demonstrates structured outputs WITHOUT using function calling.
+    Uses prompt engineering + prefilled assistant response to enforce JSON.
+    """
+    data = request.get_json() or {}
+    text = data.get("text", "")
+    custom_schema = data.get("schema", NDA_EXTRACTION_SCHEMA)
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    # Use prompt engineering + prefilled assistant message to force JSON output
+    # This technique works with any Anthropic SDK version
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system="""You are a structured data extraction assistant. You ONLY output valid JSON.
+Never include explanations, markdown formatting, or code blocks.
+Your entire response must be parseable JSON matching the requested schema.""",
+        messages=[
+            {
+                "role": "user",
+                "content": f"""Extract structured information from the following text and return it as JSON matching this schema:
+
+Schema:
+{json.dumps(custom_schema, indent=2)}
+
+Text to extract from:
+{text}
+
+Respond with ONLY the JSON object. No markdown, no code blocks, no explanation."""
+            },
+            {
+                "role": "assistant",
+                "content": "{"  # Prefill to force JSON start
+            }
+        ]
+    )
+
+    # Parse and validate the response
+    try:
+        # Reconstruct full JSON (we prefilled with "{")
+        response_text = "{" + response.content[0].text
+
+        # Clean up any trailing content after the JSON
+        # Find the matching closing brace
+        brace_count = 0
+        json_end = 0
+        for i, char in enumerate(response_text):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+
+        if json_end > 0:
+            response_text = response_text[:json_end]
+
+        extracted_data = json.loads(response_text)
+
+        # Validate against schema (basic validation)
+        validated = validate_against_schema(extracted_data, custom_schema)
+
+        return jsonify({
+            "success": True,
+            "data": extracted_data,
+            "validated": validated,
+            "raw_response": response_text
+        })
+    except json.JSONDecodeError as e:
+        return jsonify({
+            "success": False,
+            "error": f"Failed to parse JSON response: {str(e)}",
+            "raw_response": "{" + (response.content[0].text if response.content else "")
+        }), 500
+
+
+def validate_against_schema(data: dict, schema: dict) -> dict:
+    """
+    Basic JSON schema validation.
+    Returns validation result with any errors found.
+    """
+    errors = []
+    warnings = []
+
+    # Check required fields
+    required = schema.get("required", [])
+    for field in required:
+        if field not in data or data[field] is None:
+            errors.append(f"Missing required field: {field}")
+
+    # Check field types
+    properties = schema.get("properties", {})
+    for field, value in data.items():
+        if field in properties:
+            expected_type = properties[field].get("type")
+            if expected_type:
+                if expected_type == "string" and not isinstance(value, str):
+                    warnings.append(f"Field '{field}' should be string, got {type(value).__name__}")
+                elif expected_type == "boolean" and not isinstance(value, bool):
+                    warnings.append(f"Field '{field}' should be boolean, got {type(value).__name__}")
+                elif expected_type == "array" and not isinstance(value, list):
+                    warnings.append(f"Field '{field}' should be array, got {type(value).__name__}")
+                elif expected_type == "object" and not isinstance(value, dict):
+                    warnings.append(f"Field '{field}' should be object, got {type(value).__name__}")
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings
+    }
+
+
 @app.route("/history", methods=["GET"])
 def get_history():
     """Get conversation history for a session."""
@@ -340,6 +616,7 @@ def delete_history():
     """Clear conversation history for a session."""
     session_id = request.args.get("session_id", "default")
     clear_conversation(session_id)
+    clear_document_history(session_id)
 
     return jsonify({
         "session_id": session_id,

@@ -10,6 +10,8 @@ function App() {
   const [sessionId] = useState(() => generateSessionId())
   const [currentDocument, setCurrentDocument] = useState(null)
   const [toolStatus, setToolStatus] = useState(null)
+  const [diffData, setDiffData] = useState(null)
+  const [showDiff, setShowDiff] = useState(true)
   const messagesEndRef = useRef(null)
 
   useEffect(() => {
@@ -97,8 +99,23 @@ function App() {
             try {
               const base64 = data.slice(16, -1)
               setCurrentDocument(atob(base64))
+              // Clear previous diff when new document arrives (will be set by DIFF_DATA if applicable)
+              setDiffData(null)
             } catch (e) {
               console.error('Failed to decode LaTeX:', e)
+            }
+            continue
+          }
+
+          // Handle diff data for edit highlighting
+          if (data.startsWith('[DIFF_DATA:')) {
+            try {
+              const base64 = data.slice(11, -1)
+              const diffJson = atob(base64)
+              const diff = JSON.parse(diffJson)
+              setDiffData(diff)
+            } catch (e) {
+              console.error('Failed to decode diff data:', e)
             }
             continue
           }
@@ -159,6 +176,7 @@ function App() {
     await fetch(`http://localhost:5000/history?session_id=${sessionId}`, { method: 'DELETE' })
     setMessages([])
     setCurrentDocument(null)
+    setDiffData(null)
   }
 
   const downloadPDF = () => {
@@ -193,8 +211,8 @@ function App() {
     setTimeout(() => win.print(), 200)
   }
 
-  // LaTeX preview parser for iframe
-  const parseLatex = (tex) => {
+  // LaTeX preview parser for iframe with optional diff highlighting
+  const parseLatex = (tex, diff = null, highlightChanges = true) => {
     let html = tex
 
     // Remove preamble
@@ -265,6 +283,20 @@ function App() {
     html = html.replace(/\{([^{}]*)\}/g, '$1')
     html = html.replace(/\n\n+/g, '</p><p>')
 
+    // Apply diff highlighting if available
+    if (diff && highlightChanges && diff.has_changes) {
+      // Highlight added content
+      for (const addition of diff.additions || []) {
+        const content = addition.content.trim()
+        if (content && content.length > 3) {
+          // Escape special regex characters
+          const escaped = content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const regex = new RegExp(`(${escaped})`, 'g')
+          html = html.replace(regex, '<mark class="diff-added">$1</mark>')
+        }
+      }
+    }
+
     return html
   }
 
@@ -292,7 +324,7 @@ function App() {
             )}
 
             {messages.map((msg, idx) => (
-              <div key={idx} className={`message ${msg.role}`}>
+              <div key={idx} className={`message ${msg.role} message-animate`}>
                 <div className="message-header">
                   <span className="role">{msg.role === 'user' ? 'You' : 'LexiDoc'}</span>
                 </div>
@@ -300,6 +332,13 @@ function App() {
                   className="message-content"
                   dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
                 />
+                {msg.role === 'assistant' && msg.content === '' && isStreaming && (
+                  <div className="typing-indicator">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                )}
               </div>
             ))}
             <div ref={messagesEndRef} />
@@ -315,7 +354,20 @@ function App() {
               rows={3}
             />
             <button onClick={handleSend} disabled={isStreaming || !input.trim()} className="send-btn">
-              {isStreaming ? 'Processing...' : 'Send'}
+              {isStreaming ? (
+                <>
+                  <span className="spinner"></span>
+                  <span>Processing</span>
+                </>
+              ) : (
+                <>
+                  <span>Send</span>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                  </svg>
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -324,7 +376,24 @@ function App() {
         <div className="document-panel">
           <div className="panel-header">
             <h2>Document Preview</h2>
+            {diffData && diffData.has_changes && (
+              <button
+                className={`diff-toggle ${showDiff ? 'active' : ''}`}
+                onClick={() => setShowDiff(!showDiff)}
+                title="Toggle change highlighting"
+              >
+                {showDiff ? 'Hide Changes' : 'Show Changes'}
+              </button>
+            )}
           </div>
+
+          {/* Diff summary banner */}
+          {diffData && diffData.has_changes && showDiff && (
+            <div className="diff-summary">
+              <span className="diff-added-count">+{diffData.additions?.length || 0} additions</span>
+              <span className="diff-deleted-count">-{diffData.deletions?.length || 0} deletions</span>
+            </div>
+          )}
 
           <div className="document-content">
             {!currentDocument ? (
@@ -347,8 +416,10 @@ function App() {
                     .sig-row { display: flex; justify-content: space-between; margin: 20px 0; }
                     .sig-col { width: 45%; }
                     .sig-line { border: none; border-top: 1px solid #111; margin: 30px 0 5px 0; }
+                    .diff-added { background-color: #d4edda; border-radius: 2px; padding: 0 2px; }
+                    .diff-deleted { background-color: #f8d7da; text-decoration: line-through; border-radius: 2px; padding: 0 2px; }
                   </style>
-                  </head><body><p>${parseLatex(currentDocument)}</p></body></html>
+                  </head><body><p>${parseLatex(currentDocument, diffData, showDiff)}</p></body></html>
                 `}
               />
             )}
