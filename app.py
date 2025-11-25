@@ -1,3 +1,5 @@
+#./app.py
+
 """Minimal Flask backend with chat and streaming endpoints."""
 
 import time
@@ -30,7 +32,7 @@ def stream():
         for token in tokens:
             # SSE format: data: <content>\n\n
             yield f"data: {token}\n\n"
-            time.sleep(0.1)  # Simulate delay between tokens
+            time.sleep(0.2)  # 200ms delay between tokens
         yield "data: [DONE]\n\n"
 
     return Response(
