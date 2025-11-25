@@ -1,38 +1,57 @@
-#./app.py
+"""Flask backend with Anthropic Claude streaming integration."""
 
-"""Minimal Flask backend with chat and streaming endpoints."""
-
-import time
+import os
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
+from dotenv import load_dotenv
+import anthropic
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
+# Initialize Anthropic client
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Non-streaming chat endpoint for testing."""
+    """Non-streaming chat endpoint."""
     data = request.get_json() or {}
     message = data.get("message", "")
 
-    # Mock response
+    # Use Claude for non-streaming response
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": message}]
+    )
+
     return jsonify({
-        "response": "Hello world!",
+        "response": response.content[0].text,
         "message_received": message
     })
 
 
 @app.route("/stream", methods=["POST"])
 def stream():
-    """SSE streaming endpoint returning mock tokens."""
+    """SSE streaming endpoint using Anthropic Claude."""
+    data = request.get_json() or {}
+    message = data.get("message", "")
 
     def generate():
-        tokens = ["Hello", " world", "!"]
-        for token in tokens:
-            # SSE format: data: <content>\n\n
-            yield f"data: {token}\n\n"
-            time.sleep(0.2)  # 200ms delay between tokens
+        # Use Claude streaming API
+        with client.messages.stream(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": message}]
+        ) as stream:
+            for text in stream.text_stream:
+                # SSE format: data: <content>\n\n
+                yield f"data: {text}\n\n"
+
         yield "data: [DONE]\n\n"
 
     return Response(
