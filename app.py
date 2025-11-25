@@ -244,7 +244,10 @@ def stream():
 
                     elif event.type == "content_block_delta":
                         if hasattr(event.delta, "text"):
-                            yield f"data: {event.delta.text}\n\n"
+                            # Base64 encode text to preserve newlines and special chars
+                            text = event.delta.text
+                            encoded = base64.b64encode(text.encode('utf-8')).decode('utf-8')
+                            yield f"data: [TEXT:{encoded}]\n\n"
                         elif hasattr(event.delta, "partial_json"):
                             current_tool_input += event.delta.partial_json
 

@@ -1,10 +1,7 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
-// Generate a unique session ID
-const generateSessionId = () => {
-  return 'session_' + Math.random().toString(36).substring(2, 15)
-}
+const generateSessionId = () => 'session_' + Math.random().toString(36).substring(2, 15)
 
 function App() {
   const [messages, setMessages] = useState([])
@@ -12,79 +9,34 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [sessionId] = useState(() => generateSessionId())
   const [currentDocument, setCurrentDocument] = useState(null)
-  const [previousDocument, setPreviousDocument] = useState(null)
   const [toolStatus, setToolStatus] = useState(null)
-  const [showDiff, setShowDiff] = useState(false)
   const messagesEndRef = useRef(null)
-  const documentEndRef = useRef(null)
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Auto-scroll document preview when it updates
-  useEffect(() => {
-    if (currentDocument) {
-      documentEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [currentDocument])
+  // Format chat messages with markdown-like syntax
+  const formatMessage = (text) => {
+    if (!text) return ''
 
-  // Parse tool events and document content from messages
-  const parseToolEvents = useCallback((token) => {
-    if (token.startsWith('[TOOL_START:')) {
-      const toolName = token.slice(12, -1)
-      setToolStatus({ type: 'start', name: toolName })
-      return null
-    }
-    if (token.startsWith('[TOOL_EXECUTING:')) {
-      const toolName = token.slice(16, -1)
-      setToolStatus({ type: 'executing', name: toolName })
-      return null
-    }
-    if (token.startsWith('[TOOL_RESULT:')) {
-      const toolName = token.slice(13, -1)
-      setToolStatus({ type: 'result', name: toolName })
-      setTimeout(() => setToolStatus(null), 1500)
-      return null
-    }
-    // Handle LaTeX document from generate_document or apply_edits tool
-    if (token.startsWith('[LATEX_DOCUMENT:')) {
-      const base64Content = token.slice(16, -1)
-      try {
-        // Decode base64 to get the LaTeX content
-        const latexContent = atob(base64Content)
-        console.log('Received LaTeX document, length:', latexContent.length)
-        setPreviousDocument(currentDocument)
-        setCurrentDocument(latexContent)
-      } catch (e) {
-        console.error('Failed to decode LaTeX content:', e)
-      }
-      return null
-    }
-    return token
-  }, [currentDocument])
+    let html = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
 
-  // Extract document from assistant message
-  const extractDocument = useCallback((content) => {
-    // Look for document patterns
-    const docPatterns = [
-      /```[\s\S]*?```/g,
-      /={60}[\s\S]*?={60}/g,
-      /# [A-Z][\s\S]*?(?=\n\n---|\n\n\*Document|$)/g
-    ]
+    // Bold **text**
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
 
-    for (const pattern of docPatterns) {
-      const matches = content.match(pattern)
-      if (matches && matches.length > 0) {
-        const doc = matches[matches.length - 1]
-        if (doc.length > 100) { // Only consider substantial documents
-          return doc
-        }
-      }
-    }
-    return null
-  }, [])
+    // Bullet points
+    html = html.replace(/^- (.+)$/gm, '<li>$1</li>')
+    html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+
+    // Line breaks
+    html = html.replace(/\n/g, '<br>')
+
+    return html
+  }
 
   const handleSend = async () => {
     if (!input.trim() || isStreaming) return
@@ -96,83 +48,101 @@ function App() {
     setToolStatus(null)
 
     // Add empty assistant message
-    setMessages(prev => [...prev, { role: 'assistant', content: '', toolCalls: [] }])
+    setMessages(prev => [...prev, { role: 'assistant', content: '' }])
 
     try {
       const response = await fetch('http://localhost:5000/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: input,
-          session_id: sessionId
-        })
+        body: JSON.stringify({ message: input, session_id: sessionId })
       })
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
-      let fullContent = ''
+      let buffer = ''
 
-      const readStream = async () => {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+
+          if (data === '[DONE]') {
             setIsStreaming(false)
             setToolStatus(null)
-
-            // Check for document in final content
-            const doc = extractDocument(fullContent)
-            if (doc) {
-              setPreviousDocument(currentDocument)
-              setCurrentDocument(doc)
-            }
             return
           }
 
-          const chunk = decoder.decode(value)
-          const lines = chunk.split('\n')
+          // Handle tool events
+          if (data.startsWith('[TOOL_EXECUTING:')) {
+            setToolStatus(data.slice(16, -1))
+            continue
+          }
+          if (data.startsWith('[TOOL_RESULT:')) {
+            setToolStatus(null)
+            continue
+          }
+          if (data.startsWith('[TOOL_START:')) {
+            continue
+          }
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              let token = line.slice(6)
+          // Handle LaTeX document
+          if (data.startsWith('[LATEX_DOCUMENT:')) {
+            try {
+              const base64 = data.slice(16, -1)
+              setCurrentDocument(atob(base64))
+            } catch (e) {
+              console.error('Failed to decode LaTeX:', e)
+            }
+            continue
+          }
 
-              if (token === '[DONE]') {
-                setIsStreaming(false)
-                setToolStatus(null)
-                return
-              }
-
-              // Parse tool events
-              const parsed = parseToolEvents(token)
-              if (parsed === null) continue
-
-              // Append to message
-              fullContent += parsed
+          // Handle text content (base64 encoded)
+          if (data.startsWith('[TEXT:')) {
+            try {
+              const base64 = data.slice(6, -1)
+              const text = atob(base64)
               setMessages(prev => {
                 const updated = [...prev]
-                const lastIdx = updated.length - 1
-                updated[lastIdx] = {
-                  ...updated[lastIdx],
-                  content: updated[lastIdx].content + parsed
+                const last = updated[updated.length - 1]
+                if (last && last.role === 'assistant') {
+                  last.content += text
                 }
                 return updated
               })
+            } catch (e) {
+              console.error('Failed to decode text:', e)
             }
+            continue
           }
+
+          // Regular text fallback (shouldn't happen with new backend)
+          setMessages(prev => {
+            const updated = [...prev]
+            const last = updated[updated.length - 1]
+            if (last && last.role === 'assistant') {
+              last.content += data
+            }
+            return updated
+          })
         }
       }
 
-      await readStream()
+      setIsStreaming(false)
+      setToolStatus(null)
     } catch (err) {
       console.error('Stream error:', err)
       setIsStreaming(false)
-      setToolStatus(null)
       setMessages(prev => {
         const updated = [...prev]
-        const lastIdx = updated.length - 1
-        updated[lastIdx] = {
-          ...updated[lastIdx],
-          content: updated[lastIdx].content + '\n\n[Error: Connection failed. Please try again.]'
-        }
+        const last = updated[updated.length - 1]
+        if (last) last.content += '\n\n[Error: Connection failed]'
         return updated
       })
     }
@@ -186,201 +156,123 @@ function App() {
   }
 
   const clearHistory = async () => {
-    try {
-      await fetch(`http://localhost:5000/history?session_id=${sessionId}`, {
-        method: 'DELETE'
-      })
-      setMessages([])
-      setCurrentDocument(null)
-      setPreviousDocument(null)
-    } catch (err) {
-      console.error('Failed to clear history:', err)
-    }
+    await fetch(`http://localhost:5000/history?session_id=${sessionId}`, { method: 'DELETE' })
+    setMessages([])
+    setCurrentDocument(null)
   }
 
-  // Render diff between old and new document
-  const renderDiff = () => {
-    if (!previousDocument || !currentDocument || !showDiff) return null
-
-    const oldLines = previousDocument.split('\n')
-    const newLines = currentDocument.split('\n')
-
-    return (
-      <div className="diff-view">
-        <h4>Changes Made</h4>
-        <div className="diff-content">
-          {newLines.map((line, idx) => {
-            const oldLine = oldLines[idx]
-            const isNew = !oldLine
-            const isChanged = oldLine && oldLine !== line
-
-            let className = ''
-            if (isNew) className = 'diff-added'
-            else if (isChanged) className = 'diff-modified'
-
-            return (
-              <div key={idx} className={`diff-line ${className}`}>
-                <span className="line-number">{idx + 1}</span>
-                <span className="line-content">{line || ' '}</span>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-    )
-  }
-
-  // Generate PDF from the rendered document
-  const downloadAsPDF = async () => {
+  const downloadPDF = () => {
     if (!currentDocument) return
+    const win = window.open('', '_blank')
+    if (!win) return alert('Please allow popups')
 
-    // Create a hidden iframe to render the document
-    const printWindow = window.open('', '_blank')
-    if (!printWindow) {
-      alert('Please allow popups to download PDF')
-      return
-    }
+    // Simple LaTeX to HTML
+    let html = currentDocument
+      .replace(/\\documentclass[\s\S]*?\\begin\{document\}/g, '')
+      .replace(/\\end\{document\}/g, '')
+      .replace(/\\section\*?\{([^}]+)\}/g, '<h2>$1</h2>')
+      .replace(/\\textbf\{([^}]+)\}/g, '<strong>$1</strong>')
+      .replace(/\\begin\{itemize\}/g, '<ul>')
+      .replace(/\\end\{itemize\}/g, '</ul>')
+      .replace(/\\item\s*/g, '<li>')
+      .replace(/\\\\/g, '<br>')
+      .replace(/\\[a-zA-Z]+\{[^}]*\}/g, '')
+      .replace(/\\[a-zA-Z]+/g, '')
+      .replace(/\n\n/g, '</p><p>')
 
-    // Parse LaTeX to HTML for printing
-    const parseLatexForPrint = (tex) => {
-      let html = tex
-      // Remove preamble
-      html = html.replace(/\\documentclass[^]*?\\begin\{document\}/s, '')
-      html = html.replace(/\\end\{document\}/g, '')
-      html = html.replace(/\\usepackage[^\n]*/g, '')
-
-      // Remove table/tabular environments and their column specs like {p{3in}p{3in}}
-      html = html.replace(/\\begin\{tabular\}\{[^}]*\}/g, '')
-      html = html.replace(/\\end\{tabular\}/g, '')
-      html = html.replace(/\\begin\{table\}[^]*?\\end\{table\}/gs, '')
-      html = html.replace(/\{p\{[^}]+\}[^}]*\}/g, '') // Remove {p{3in}p{3in}} style specs
-      html = html.replace(/\{[lcr|]+\}/g, '') // Remove {lll} or {|c|c|} column specs
-
-      // Remove other environments we don't need
-      html = html.replace(/\\begin\{minipage\}[^]*?\\end\{minipage\}/gs, '')
-      html = html.replace(/\\begin\{flushright\}([^]*?)\\end\{flushright\}/g, '<div style="text-align:right">$1</div>')
-      html = html.replace(/\\begin\{flushleft\}([^]*?)\\end\{flushleft\}/g, '<div style="text-align:left">$1</div>')
-
-      // Title handling
-      html = html.replace(/\\title\{([^}]+)\}/g, '<h1>$1</h1>')
-      html = html.replace(/\\maketitle/g, '')
-      html = html.replace(/\\begin\{center\}([^]*?)\\end\{center\}/g, '<div style="text-align:center">$1</div>')
-      html = html.replace(/\{\\Large\\bfseries\s*([^}]+)\}/g, '<h1>$1</h1>')
-      html = html.replace(/\{\\large\\bfseries\s*([^}]+)\}/g, '<h2>$1</h2>')
-      html = html.replace(/\\textbf\{\\Large\s*([^}]+)\}/g, '<h1>$1</h1>')
-
-      // Sections
-      html = html.replace(/\\section\*?\{([^}]+)\}/g, '<h2>$1</h2>')
-      html = html.replace(/\\subsection\*?\{([^}]+)\}/g, '<h3>$1</h3>')
-
-      // Text formatting
-      html = html.replace(/\\textbf\{([^}]+)\}/g, '<strong>$1</strong>')
-      html = html.replace(/\\textit\{([^}]+)\}/g, '<em>$1</em>')
-      html = html.replace(/\\underline\{([^}]+)\}/g, '<u>$1</u>')
-      html = html.replace(/\\emph\{([^}]+)\}/g, '<em>$1</em>')
-
-      // Lists
-      html = html.replace(/\\begin\{itemize\}/g, '<ul>')
-      html = html.replace(/\\end\{itemize\}/g, '</ul>')
-      html = html.replace(/\\begin\{enumerate\}/g, '<ol>')
-      html = html.replace(/\\end\{enumerate\}/g, '</ol>')
-      html = html.replace(/\\item\s*/g, '<li>')
-
-      // Spacing
-      html = html.replace(/\\vspace\{[^}]+\}/g, '<div style="height:20px"></div>')
-      html = html.replace(/\\hspace\{[^}]+\}/g, '&nbsp;&nbsp;')
-      html = html.replace(/\\hfill/g, '')
-      html = html.replace(/\\noindent\s*/g, '')
-      html = html.replace(/\\par\s*/g, '</p><p>')
-      html = html.replace(/\\bigskip/g, '<br><br>')
-      html = html.replace(/\\medskip/g, '<br>')
-      html = html.replace(/\\smallskip/g, '')
-      html = html.replace(/\\newline/g, '<br>')
-      html = html.replace(/\\\\\s*/g, '<br>')
-
-      // Rules/lines
-      html = html.replace(/\\rule\{([^}]+)\}\{[^}]+\}/g, '<hr style="width:$1;border:none;border-top:1px solid #111">')
-      html = html.replace(/\\hrulefill/g, '<hr>')
-
-      // Special characters
-      html = html.replace(/\\&/g, '&amp;')
-      html = html.replace(/\\%/g, '%')
-      html = html.replace(/\\\$/g, '$')
-      html = html.replace(/\\_/g, '_')
-      html = html.replace(/\\#/g, '#')
-      html = html.replace(/\\ldots/g, '...')
-      html = html.replace(/---/g, '—')
-      html = html.replace(/--/g, '–')
-      html = html.replace(/``/g, '"')
-      html = html.replace(/''/g, '"')
-
-      // Clean up remaining LaTeX commands and braces
-      html = html.replace(/\\[a-zA-Z]+\[[^\]]*\]\{[^}]*\}/g, '') // commands with optional args
-      html = html.replace(/\\[a-zA-Z]+\{[^}]*\}/g, '') // commands with args
-      html = html.replace(/\\[a-zA-Z]+/g, '') // commands without args
-      html = html.replace(/\{([^{}]*)\}/g, '$1') // remove remaining braces but keep content
-
-      // Paragraphs
-      html = html.replace(/\n\s*\n/g, '</p><p>')
-
-      // Clean up empty tags and extra whitespace
-      html = html.replace(/<p>\s*<\/p>/g, '')
-      html = html.replace(/\s+/g, ' ')
-
-      return '<p>' + html + '</p>'
-    }
-
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>NDA Document</title>
-        <style>
-          body {
-            font-family: 'Times New Roman', Georgia, serif;
-            padding: 40px 60px;
-            background: white;
-            color: #111;
-            line-height: 1.6;
-            max-width: 800px;
-            margin: 0 auto;
-            font-size: 12pt;
-          }
-          h1 { text-align: center; font-size: 18pt; font-weight: bold; margin-bottom: 24px; text-transform: uppercase; border-bottom: 2px solid #111; padding-bottom: 10px; }
-          h2 { font-size: 14pt; font-weight: bold; margin-top: 24px; margin-bottom: 12px; }
-          h3 { font-size: 12pt; font-weight: bold; margin-top: 16px; margin-bottom: 8px; }
-          p { margin: 12px 0; text-align: justify; }
-          ul, ol { margin: 12px 0; padding-left: 24px; }
-          li { margin: 6px 0; }
-          @media print {
-            body { padding: 20px; }
-          }
-        </style>
-      </head>
-      <body>
-        ${parseLatexForPrint(currentDocument)}
-      </body>
-      </html>
+    win.document.write(`
+      <!DOCTYPE html><html><head><title>NDA</title>
+      <style>
+        body { font-family: 'Times New Roman', serif; padding: 40px 60px; max-width: 800px; margin: 0 auto; }
+        h2 { margin-top: 24px; }
+        p { text-align: justify; line-height: 1.6; }
+      </style>
+      </head><body><p>${html}</p></body></html>
     `)
-    printWindow.document.close()
+    win.document.close()
+    setTimeout(() => win.print(), 200)
+  }
 
-    // Wait for content to load then print
-    setTimeout(() => {
-      printWindow.print()
-    }, 250)
+  // LaTeX preview parser for iframe
+  const parseLatex = (tex) => {
+    let html = tex
+
+    // Remove preamble
+    html = html.replace(/\\documentclass[\s\S]*?\\begin\{document\}/g, '')
+    html = html.replace(/\\end\{document\}/g, '')
+    html = html.replace(/\\usepackage[^\n]*/g, '')
+
+    // Remove tabular/table environments completely and replace with styled div
+    html = html.replace(/\\begin\{tabular\}\{[^}]*\}([\s\S]*?)\\end\{tabular\}/g, (_, content) => {
+      // Parse table rows - split by \\ or \hline
+      const rows = content.split(/\\\\|\\hline/).filter(r => r.trim())
+      let tableHtml = '<div class="signature-section">'
+      for (const row of rows) {
+        // Split columns by &
+        const cols = row.split('&').map(c => c.trim())
+        if (cols.length >= 2) {
+          tableHtml += `<div class="sig-row"><div class="sig-col">${cols[0]}</div><div class="sig-col">${cols[1]}</div></div>`
+        } else if (cols[0]) {
+          tableHtml += `<div class="sig-row"><div class="sig-col">${cols[0]}</div></div>`
+        }
+      }
+      tableHtml += '</div>'
+      return tableHtml
+    })
+
+    // Remove any remaining table formatting artifacts
+    html = html.replace(/\{[lcr|]+\}/g, '')
+    html = html.replace(/\{p\{[^}]+\}[^}]*\}/g, '')
+    html = html.replace(/\{[\d.]+pt\}/g, '')
+    html = html.replace(/\\hline/g, '')
+    html = html.replace(/\\cline\{[^}]*\}/g, '')
+
+    // Sections
+    html = html.replace(/\\section\*?\{([^}]+)\}/g, '<h2>$1</h2>')
+    html = html.replace(/\\subsection\*?\{([^}]+)\}/g, '<h3>$1</h3>')
+
+    // Text formatting
+    html = html.replace(/\\textbf\{([^}]+)\}/g, '<strong>$1</strong>')
+    html = html.replace(/\\textit\{([^}]+)\}/g, '<em>$1</em>')
+    html = html.replace(/\\underline\{([^}]+)\}/g, '<u>$1</u>')
+
+    // Lists
+    html = html.replace(/\\begin\{itemize\}/g, '<ul>')
+    html = html.replace(/\\end\{itemize\}/g, '</ul>')
+    html = html.replace(/\\begin\{enumerate\}/g, '<ol>')
+    html = html.replace(/\\end\{enumerate\}/g, '</ol>')
+    html = html.replace(/\\item\s*/g, '<li>')
+
+    // Other environments
+    html = html.replace(/\\begin\{center\}([\s\S]*?)\\end\{center\}/g, '<div style="text-align:center">$1</div>')
+
+    // Spacing
+    html = html.replace(/\\\\/g, '<br>')
+    html = html.replace(/\\vspace\{[^}]+\}/g, '<br>')
+    html = html.replace(/\\hspace\{[^}]+\}/g, '&nbsp;&nbsp;')
+    html = html.replace(/\\noindent/g, '')
+    html = html.replace(/\\par/g, '</p><p>')
+    html = html.replace(/\\rule\{[^}]+\}\{[^}]+\}/g, '<hr class="sig-line">')
+
+    // Special chars
+    html = html.replace(/\\&/g, '&amp;')
+    html = html.replace(/---/g, '&mdash;')
+    html = html.replace(/--/g, '&ndash;')
+
+    // Clean remaining LaTeX
+    html = html.replace(/\\[a-zA-Z]+\{[^}]*\}/g, '')
+    html = html.replace(/\\[a-zA-Z]+/g, '')
+    html = html.replace(/\{([^{}]*)\}/g, '$1')
+    html = html.replace(/\n\n+/g, '</p><p>')
+
+    return html
   }
 
   return (
     <div className="app-container">
-      {/* Header */}
       <header className="app-header">
-        <h1>LexiDoc - Legal Document Assistant</h1>
-        <div className="header-actions">
-          <span className="session-badge">Session: {sessionId.slice(0, 12)}...</span>
-          <button onClick={clearHistory} className="clear-btn" disabled={isStreaming}>
-            Clear History
-          </button>
-        </div>
+        <h1>LexiDoc - NDA Assistant</h1>
+        <button onClick={clearHistory} className="clear-btn" disabled={isStreaming}>Clear</button>
       </header>
 
       <div className="main-content">
@@ -388,26 +280,14 @@ function App() {
         <div className="chat-panel">
           <div className="panel-header">
             <h2>Chat</h2>
-            {toolStatus && (
-              <div className={`tool-status ${toolStatus.type}`}>
-                {toolStatus.type === 'start' && `Preparing ${toolStatus.name}...`}
-                {toolStatus.type === 'executing' && `Executing ${toolStatus.name}...`}
-                {toolStatus.type === 'result' && `${toolStatus.name} complete`}
-              </div>
-            )}
+            {toolStatus && <span className="tool-status">Running: {toolStatus}</span>}
           </div>
 
           <div className="message-list">
             {messages.length === 0 && (
               <div className="welcome-message">
                 <h3>Welcome to LexiDoc</h3>
-                <p>I can help you create legal documents through conversation. Try:</p>
-                <ul>
-                  <li>"Help me create an NDA between my company and a contractor"</li>
-                  <li>"I need an employment agreement template"</li>
-                  <li>"Draft a simple service agreement"</li>
-                </ul>
-                <p>I'll ask clarifying questions and generate the document for you.</p>
+                <p>I can help you create NDAs. Just tell me what you need!</p>
               </div>
             )}
 
@@ -416,12 +296,10 @@ function App() {
                 <div className="message-header">
                   <span className="role">{msg.role === 'user' ? 'You' : 'LexiDoc'}</span>
                 </div>
-                <div className="message-content">
-                  {msg.content}
-                  {msg.role === 'assistant' && isStreaming && idx === messages.length - 1 && (
-                    <span className="cursor">▌</span>
-                  )}
-                </div>
+                <div
+                  className="message-content"
+                  dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
+                />
               </div>
             ))}
             <div ref={messagesEndRef} />
@@ -432,232 +310,56 @@ function App() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyPress={handleKeyPress}
-              placeholder="Describe the legal document you need..."
+              placeholder="Describe your NDA requirements..."
               disabled={isStreaming}
               rows={3}
             />
-            <button
-              onClick={handleSend}
-              disabled={isStreaming || !input.trim()}
-              className="send-btn"
-            >
-              {isStreaming ? (
-                <>
-                  <span className="spinner"></span>
-                  Processing...
-                </>
-              ) : (
-                'Send'
-              )}
+            <button onClick={handleSend} disabled={isStreaming || !input.trim()} className="send-btn">
+              {isStreaming ? 'Processing...' : 'Send'}
             </button>
           </div>
         </div>
 
-        {/* Document Preview Panel */}
+        {/* Document Panel */}
         <div className="document-panel">
           <div className="panel-header">
             <h2>Document Preview</h2>
-            {previousDocument && currentDocument && (
-              <button
-                onClick={() => setShowDiff(!showDiff)}
-                className={`diff-toggle ${showDiff ? 'active' : ''}`}
-              >
-                {showDiff ? 'Hide Changes' : 'Show Changes'}
-              </button>
-            )}
           </div>
 
           <div className="document-content">
             {!currentDocument ? (
               <div className="no-document">
-                <p>No document generated yet.</p>
-                <p>Start a conversation to create a legal document.</p>
+                <p>No document yet.</p>
+                <p>Chat to create your NDA.</p>
               </div>
-            ) : showDiff ? (
-              renderDiff()
             ) : (
               <iframe
-                title="Document Preview"
+                title="Preview"
                 className="latex-preview-frame"
                 srcDoc={`
-                  <!DOCTYPE html>
-                  <html>
-                  <head>
-                    <style>
-                      body {
-                        font-family: 'Times New Roman', Georgia, serif;
-                        padding: 40px 50px;
-                        background: white;
-                        color: #111;
-                        line-height: 1.6;
-                        max-width: 800px;
-                        margin: 0 auto;
-                        font-size: 12pt;
-                      }
-                      h1 {
-                        text-align: center;
-                        font-size: 18pt;
-                        font-weight: bold;
-                        margin-bottom: 24px;
-                        text-transform: uppercase;
-                        border-bottom: 2px solid #111;
-                        padding-bottom: 10px;
-                      }
-                      h2 {
-                        font-size: 14pt;
-                        font-weight: bold;
-                        margin-top: 24px;
-                        margin-bottom: 12px;
-                        text-transform: uppercase;
-                      }
-                      h3 {
-                        font-size: 12pt;
-                        font-weight: bold;
-                        margin-top: 16px;
-                        margin-bottom: 8px;
-                      }
-                      p {
-                        margin: 12px 0;
-                        text-align: justify;
-                      }
-                      ul, ol {
-                        margin: 12px 0;
-                        padding-left: 24px;
-                      }
-                      li {
-                        margin: 6px 0;
-                      }
-                      .signature-block {
-                        margin-top: 40px;
-                        display: flex;
-                        justify-content: space-between;
-                      }
-                      .signature-line {
-                        width: 45%;
-                      }
-                      .signature-line hr {
-                        border: none;
-                        border-top: 1px solid #111;
-                        margin: 30px 0 5px 0;
-                      }
-                      .center {
-                        text-align: center;
-                      }
-                      .bold {
-                        font-weight: bold;
-                      }
-                      pre {
-                        white-space: pre-wrap;
-                        font-family: 'Times New Roman', Georgia, serif;
-                        font-size: 12pt;
-                      }
-                    </style>
-                  </head>
-                  <body>
-                    <div id="content"></div>
-                    <script>
-                      const latex = ${JSON.stringify(currentDocument)};
-
-                      function parseLatex(tex) {
-                        let html = tex;
-
-                        // Remove document class and preamble
-                        html = html.replace(/\\\\documentclass[^]*?\\\\begin\\{document\\}/s, '');
-                        html = html.replace(/\\\\end\\{document\\}/g, '');
-                        html = html.replace(/\\\\usepackage[^\\n]*/g, '');
-
-                        // Title - handle various formats
-                        html = html.replace(/\\\\title\\{([^}]+)\\}/g, '<h1>$1</h1>');
-                        html = html.replace(/\\\\maketitle/g, '');
-                        html = html.replace(/\\\\begin\\{center\\}([^]*?)\\\\end\\{center\\}/g, '<div class="center">$1</div>');
-                        html = html.replace(/\\{\\\\Large\\\\bfseries\\s*([^}]+)\\}/g, '<h1>$1</h1>');
-                        html = html.replace(/\\{\\\\large\\\\bfseries\\s*([^}]+)\\}/g, '<h2>$1</h2>');
-                        html = html.replace(/\\\\textbf\\{\\\\Large\\s*([^}]+)\\}/g, '<h1>$1</h1>');
-
-                        // Sections
-                        html = html.replace(/\\\\section\\*?\\{([^}]+)\\}/g, '<h2>$1</h2>');
-                        html = html.replace(/\\\\subsection\\*?\\{([^}]+)\\}/g, '<h3>$1</h3>');
-
-                        // Text formatting
-                        html = html.replace(/\\\\textbf\\{([^}]+)\\}/g, '<strong>$1</strong>');
-                        html = html.replace(/\\\\textit\\{([^}]+)\\}/g, '<em>$1</em>');
-                        html = html.replace(/\\\\underline\\{([^}]+)\\}/g, '<u>$1</u>');
-                        html = html.replace(/\\\\emph\\{([^}]+)\\}/g, '<em>$1</em>');
-
-                        // Lists
-                        html = html.replace(/\\\\begin\\{itemize\\}/g, '<ul>');
-                        html = html.replace(/\\\\end\\{itemize\\}/g, '</ul>');
-                        html = html.replace(/\\\\begin\\{enumerate\\}/g, '<ol>');
-                        html = html.replace(/\\\\end\\{enumerate\\}/g, '</ol>');
-                        html = html.replace(/\\\\item\\s*/g, '<li>');
-
-                        // Spacing and formatting
-                        html = html.replace(/\\\\vspace\\{[^}]+\\}/g, '<div style="height:20px"></div>');
-                        html = html.replace(/\\\\hspace\\{[^}]+\\}/g, '&nbsp;&nbsp;');
-                        html = html.replace(/\\\\hfill/g, '<span style="float:right">');
-                        html = html.replace(/\\\\noindent\\s*/g, '');
-                        html = html.replace(/\\\\par\\s*/g, '</p><p>');
-                        html = html.replace(/\\\\bigskip/g, '<br><br>');
-                        html = html.replace(/\\\\medskip/g, '<br>');
-                        html = html.replace(/\\\\smallskip/g, '');
-                        html = html.replace(/\\\\newline/g, '<br>');
-                        html = html.replace(/\\\\\\\\\\s*/g, '<br>');
-
-                        // Rules/lines for signatures
-                        html = html.replace(/\\\\rule\\{([^}]+)\\}\\{[^}]+\\}/g, '<hr style="width:$1;display:inline-block;border:none;border-top:1px solid #111">');
-                        html = html.replace(/\\\\hrulefill/g, '<hr>');
-
-                        // Special characters
-                        html = html.replace(/\\\\&/g, '&amp;');
-                        html = html.replace(/\\\\%/g, '%');
-                        html = html.replace(/\\\\\\$/g, '$');
-                        html = html.replace(/\\\\_/g, '_');
-                        html = html.replace(/\\\\#/g, '#');
-                        html = html.replace(/\\\\ldots/g, '...');
-                        html = html.replace(/---/g, '—');
-                        html = html.replace(/--/g, '–');
-                        html = html.replace(/\`\`/g, '"');
-                        html = html.replace(/''/g, '"');
-
-                        // Clean up remaining LaTeX commands
-                        html = html.replace(/\\\\[a-zA-Z]+\\{[^}]*\\}/g, '');
-                        html = html.replace(/\\\\[a-zA-Z]+/g, '');
-
-                        // Convert double newlines to paragraphs
-                        html = html.replace(/\\n\\s*\\n/g, '</p><p>');
-
-                        return '<p>' + html + '</p>';
-                      }
-
-                      try {
-                        document.getElementById('content').innerHTML = parseLatex(latex);
-                      } catch(e) {
-                        document.getElementById('content').innerHTML = '<pre>' + latex + '</pre>';
-                      }
-                    </script>
-                  </body>
-                  </html>
+                  <!DOCTYPE html><html><head>
+                  <style>
+                    body { font-family: 'Times New Roman', serif; padding: 40px; color: #111; line-height: 1.6; }
+                    h2 { font-size: 14pt; margin-top: 20px; }
+                    p { margin: 10px 0; text-align: justify; }
+                    ul, ol { padding-left: 24px; }
+                    .signature-section { margin-top: 40px; }
+                    .sig-row { display: flex; justify-content: space-between; margin: 20px 0; }
+                    .sig-col { width: 45%; }
+                    .sig-line { border: none; border-top: 1px solid #111; margin: 30px 0 5px 0; }
+                  </style>
+                  </head><body><p>${parseLatex(currentDocument)}</p></body></html>
                 `}
               />
             )}
-            <div ref={documentEndRef} />
           </div>
 
           {currentDocument && (
             <div className="document-actions">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(currentDocument)
-                  alert('Document copied to clipboard!')
-                }}
-                className="action-btn"
-              >
+              <button onClick={() => navigator.clipboard.writeText(currentDocument)} className="action-btn">
                 Copy LaTeX
               </button>
-              <button
-                onClick={downloadAsPDF}
-                className="action-btn primary"
-              >
+              <button onClick={downloadPDF} className="action-btn primary">
                 Download PDF
               </button>
             </div>
@@ -665,9 +367,8 @@ function App() {
         </div>
       </div>
 
-      {/* Footer */}
       <footer className="app-footer">
-        <p>LexiDoc - AI-Powered Legal Document Assistant | Not legal advice - consult a qualified attorney</p>
+        <p>LexiDoc - Not legal advice</p>
       </footer>
     </div>
   )
