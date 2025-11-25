@@ -1,50 +1,52 @@
-# LexiDoc - AI Legal Document Assistant
+# LexiDoc - AI NDA Document Assistant
 
-A full-stack chat interface that uses **streaming SSE responses**, **LLM function calling**, and **prompt engineering** to help users generate legal documents through conversation.
+A full-stack chat interface that uses **streaming SSE responses**, **LLM function calling**, and **prompt engineering** to help users generate Non-Disclosure Agreements through conversation.
 
 ## Features
 
-### Core Features (100% Complete)
+### Core Features
 
-#### 1. Server-Sent Events (SSE) Streaming (30%)
-- **Token-by-token streaming** - Responses stream in real-time like ChatGPT
-- **Connection management** - Handles reconnection and error recovery
+#### 1. Server-Sent Events (SSE) Streaming
+- **Token-by-token streaming** - Responses stream in real-time
+- **Base64 encoding** - Preserves all characters including newlines during streaming
 - **Tool status indicators** - Shows when tools are being called/executed
 - **Streams both conversation and document generation**
 
-#### 2. LLM Function/Tool Calling (40%)
+#### 2. LLM Function/Tool Calling
 Three tools implemented:
-- **`extract_information`** - Extracts structured data from documents (entities, facts, key points, metadata)
-- **`generate_document`** - Creates legal documents from specifications
-- **`apply_edits`** - Modifies existing documents based on requests
+- **`extract_information`** - Saves structured data (party names, dates, purpose) to session memory
+- **`generate_document`** - Creates NDA documents in LaTeX format, rendered in preview panel
+- **`apply_edits`** - Modifies existing documents based on user requests
 
 Tool flow:
 1. Claude detects when to use a tool
 2. Backend executes the Python function
-3. Result is pushed back to Claude
-4. Conversation continues with tool results
+3. LaTeX content is base64 encoded and sent to frontend
+4. Document renders in the preview panel
+5. Diff highlighting shows changes between versions
 
-#### 3. System Prompts (30%)
+#### 3. System Prompts
 Comprehensive system prompt that:
-- Defines Claude as "LexiDoc" legal document assistant
-- Specifies when to use each tool with examples
-- Handles edge cases (missing info, ambiguous requests)
-- Includes clarifying question templates
-- Maintains conversation context
+- Defines Claude as "LexiDoc" NDA assistant
+- Enforces bullet-point formatting for questions
+- Specifies when to use each tool
+- Prevents raw LaTeX in chat (tool-only)
+- Excludes jurisdiction/governing law for simplicity
 
-### Nice-to-Have Features (All Implemented)
+### Additional Features
 - **Conversation memory** - Maintains last 20 messages across requests
-- **Document preview panel** - Live preview of generated documents
-- **Edit highlighting** - Diff view showing changes between document versions
-- **Copy/Download** - Export documents easily
-- **Session management** - Clear history, persistent sessions
+- **Document preview panel** - Live LaTeX-to-HTML rendering
+- **Edit highlighting** - Diff view showing additions/deletions between versions
+- **PDF Download** - Export documents via print dialog
+- **Copy LaTeX** - Copy raw LaTeX to clipboard
+- **Session management** - Clear history functionality
 
 ## Tech Stack
 
 - **Backend**: Python 3.10+ / Flask
 - **Frontend**: React (Vite)
 - **LLM API**: Anthropic Claude (claude-sonnet-4)
-- **Streaming**: Server-Sent Events (SSE)
+- **Streaming**: Server-Sent Events (SSE) with base64 encoding
 
 ## Project Structure
 
@@ -58,7 +60,9 @@ LexidenAI_TakeHome/
 └── frontend/
     ├── src/
     │   ├── App.jsx     # React chat UI with document preview
-    │   └── App.css     # Styling
+    │   ├── App.css     # Styling (dark theme)
+    │   ├── index.css   # Base styles
+    │   └── main.jsx    # React entry point
     └── package.json
 ```
 
@@ -102,6 +106,7 @@ Frontend runs on `http://localhost:5173`
 | `/chat` | POST | Non-streaming chat (for testing) |
 | `/history` | GET | Get conversation history |
 | `/history` | DELETE | Clear conversation history |
+| `/extract-structured` | POST | Extract structured data using JSON schema |
 
 ### Request Format
 ```json
@@ -111,58 +116,82 @@ Frontend runs on `http://localhost:5173`
 }
 ```
 
+### SSE Event Types
+- `[TEXT:<base64>]` - Streamed text content (base64 encoded)
+- `[LATEX_DOCUMENT:<base64>]` - Full LaTeX document for preview
+- `[DIFF_DATA:<base64>]` - Diff information for edit highlighting
+- `[TOOL_START:<name>]` - Tool execution starting
+- `[TOOL_EXECUTING:<name>]` - Tool currently running
+- `[TOOL_RESULT:<name>]` - Tool completed
+- `[DONE]` - Stream finished
+
 ## Tool Implementations
 
 ### extract_information
-Extracts from legal text:
-- **Entities**: Parties, dates, monetary values, percentages, durations, emails
-- **Facts**: Obligations, conditions, prohibitions, definitions
-- **Key Points**: Summary sentences, action items, deadlines
-- **Metadata**: Document type, word count, sections
+Saves to session memory:
+- Party A name (Disclosing Party)
+- Party B name (Receiving Party)
+- Effective date
+- Purpose of the NDA
+- Mutual vs one-way
 
 ### generate_document
-Generates document structures for:
-- Reports, summaries, articles, emails, memos, proposals
-- Customizable sections and tone (formal, informal, technical)
-- Max length constraints
+Generates NDA with:
+- Title and effective date
+- Party definitions
+- Confidential information definition
+- Obligations of receiving party
+- Term and termination
+- Signature blocks (simple text format, no tables)
 
 ### apply_edits
-Edit types:
-- Grammar fixes (spacing, punctuation, capitalization)
-- Simplification (legal jargon to plain language)
-- Tone changes (formal/informal)
-- Formatting improvements
-- Custom edits based on instructions
+Allows modifications like:
+- Making NDA mutual/one-way
+- Changing party names
+- Adjusting confidentiality period
+- Adding/removing clauses
 
 ## Prompt Engineering Decisions
 
 ### 1. Role Definition
-Claude is defined as "LexiDoc" - a specialized legal document assistant. This grounds the model in a specific persona with clear expertise boundaries.
+Claude is defined as "LexiDoc" - a specialized NDA assistant that refuses to generate other document types.
 
-### 2. Tool Trigger Patterns
-Each tool has explicit trigger patterns:
-- Extract: "What does this say about...", "Find all mentions of..."
-- Generate: "Create a...", "Draft an...", "I need a..."
-- Edit: "Make it more formal", "Simplify this", "Change the tone"
+### 2. Communication Style
+Enforced bullet-point formatting:
+- Questions grouped under bold headers
+- One piece of information per bullet
+- Short, scannable responses
 
-### 3. Clarifying Questions
-The prompt includes templates for gathering missing information before generating documents:
-- Party names and details
-- Document purpose
-- Key terms and conditions
-- Jurisdiction requirements
+### 3. Tool-Only Document Output
+LaTeX is NEVER output in chat - only via tools. This keeps chat clean and ensures documents render in the preview panel.
 
-### 4. Output Formatting
-Structured output formats for each operation:
-- Extractions: Tables with risk levels
-- Documents: Numbered sections with clear headers
-- Edits: Before/after comparisons with change lists
+### 4. Simplified NDA
+- No jurisdiction/governing law clauses
+- No complex tabular signatures
+- Focus on core NDA elements
 
-### 5. Memory Instructions
-Guidelines for maintaining context:
-- Track current document and type
-- Remember party names once identified
-- Reference previous extractions and edits
+### 5. Diff Highlighting
+When edits are made:
+- Computes line-by-line diff
+- Highlights additions in green
+- Shows deletion count
+- Toggle to show/hide changes
+
+## Architecture
+
+### Backend (app.py)
+- Flask app with CORS
+- Anthropic streaming client
+- Document version history with diff computation
+- Tool execution loop
+- Base64 encoding for SSE safety
+
+### Frontend (App.jsx)
+- Split-view layout (50/50 chat + preview)
+- SSE stream parsing with buffering
+- LaTeX-to-HTML parser for preview
+- Markdown-like chat formatting
+- Dark theme UI
 
 ## Testing the App
 
@@ -170,73 +199,34 @@ Guidelines for maintaining context:
 2. Start frontend: `cd frontend && npm run dev`
 3. Open `http://localhost:5173`
 
-### Sample Conversations
+### Sample Conversation
 
-**Creating an NDA:**
 ```
-You: Help me create an NDA between my company TechCorp and a freelancer
-LexiDoc: [Asks clarifying questions about mutual/one-way, duration, etc.]
-You: Mutual NDA, 2 years, for software development work
-LexiDoc: [Generates NDA document in preview panel]
+You: I need an NDA
+
+LexiDoc: I'll help you create an NDA. I need a few details:
+
+**Party Information:**
+- What is the full legal name of the Disclosing Party?
+- What is the full legal name of the Receiving Party?
+
+**Agreement Details:**
+- What is the purpose of this NDA?
+- Should this be mutual or one-way?
+- What is the effective date?
+
+You: TechCorp Inc and John Smith, for a consulting project, mutual, starting today
+
+LexiDoc: [Generates NDA in preview panel]
+
+You: Change the confidentiality period to 3 years
+
+LexiDoc: [Updates document, shows diff highlighting]
 ```
-
-**Extracting Information:**
-```
-You: [Paste a contract]
-You: What are the payment terms in this agreement?
-LexiDoc: [Uses extract_information tool, returns structured data]
-```
-
-**Editing a Document:**
-```
-You: Make the liability clause more favorable to the vendor
-LexiDoc: [Uses apply_edits tool, shows diff in preview]
-```
-
-## Files Overview
-
-### app.py
-- Flask app with CORS
-- SSE streaming endpoint with tool detection
-- Conversation memory (20 messages max)
-- Tool execution loop
-
-### tools.py
-- Tool JSON schemas for Claude
-- `extract_information()` - Regex-based extraction
-- `generate_document()` - Template-based generation
-- `apply_edits()` - Text transformation functions
-- `execute_tool()` - Router function
-
-### system_prompt.py
-- 300+ line comprehensive system prompt
-- Tool usage guidelines with examples
-- Clarifying question templates
-- Output format specifications
-- Memory maintenance instructions
-
-### App.jsx
-- Split-view layout (chat + document preview)
-- SSE stream parsing with tool events
-- Document extraction from responses
-- Diff view for edit highlighting
-- Session management
 
 ## Limitations & Future Improvements
 
 1. **In-memory storage** - Production would use Redis/database
-2. **Mock tool outputs** - Real implementation would use NLP/AI
-3. **No authentication** - Add user auth for production
-4. **Single model** - Could support multiple LLM providers
-
-## Video Demo Checklist
-
-For the walkthrough video, demonstrate:
-1. [ ] Chat interface with streaming responses
-2. [ ] Asking for a document (triggers clarifying questions)
-3. [ ] Document generation (appears in preview panel)
-4. [ ] Extracting information from pasted text
-5. [ ] Editing a document (shows diff view)
-6. [ ] Tool status indicators during execution
-7. [ ] Conversation memory (reference earlier context)
-8. [ ] Clear history functionality
+2. **No authentication** - Add user auth for production
+3. **Single document type** - Could expand to other legal documents
+4. **Basic LaTeX parser** - Could use proper LaTeX rendering library
