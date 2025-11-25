@@ -13,10 +13,20 @@ function App() {
   const [diffData, setDiffData] = useState(null)
   const [showDiff, setShowDiff] = useState(true)
   const messagesEndRef = useRef(null)
+  const toolTimeoutRef = useRef(null)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (toolTimeoutRef.current) {
+        clearTimeout(toolTimeoutRef.current)
+      }
+    }
+  }, [])
 
   // Format chat messages with markdown-like syntax
   const formatMessage = (text) => {
@@ -86,17 +96,34 @@ function App() {
             const toolName = data.slice(16, -1)
             console.log('Tool executing:', toolName)
             setToolStatus(toolName)
+
+            // Clear any existing timeout
+            if (toolTimeoutRef.current) {
+              clearTimeout(toolTimeoutRef.current)
+            }
             continue
           }
           if (data.startsWith('[TOOL_RESULT:')) {
             console.log('Tool result received')
-            setToolStatus(null)
+
+            // Keep tool status visible for at least 2 seconds after completion
+            if (toolTimeoutRef.current) {
+              clearTimeout(toolTimeoutRef.current)
+            }
+            toolTimeoutRef.current = setTimeout(() => {
+              setToolStatus(null)
+            }, 2000)
             continue
           }
           if (data.startsWith('[TOOL_START:')) {
             const toolName = data.slice(12, -1)
             console.log('Tool started:', toolName)
             setToolStatus(toolName)
+
+            // Clear any existing timeout
+            if (toolTimeoutRef.current) {
+              clearTimeout(toolTimeoutRef.current)
+            }
             continue
           }
 
