@@ -2,6 +2,7 @@
 
 import os
 import json
+import base64
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -268,6 +269,16 @@ def stream():
                 tool_results = []
                 for tool_block in tool_use_blocks:
                     yield f"data: [TOOL_EXECUTING:{tool_block.name}]\n\n"
+
+                    # Check if this is a document generation tool - send LaTeX to frontend
+                    if tool_block.name in ["generate_document", "apply_edits"]:
+                        latex_content = tool_block.input.get("latex_content", "")
+                        if latex_content:
+                            # Send LaTeX content as a special event for the preview panel
+                            # Base64 encode to avoid SSE parsing issues with newlines
+                            encoded_latex = base64.b64encode(latex_content.encode('utf-8')).decode('utf-8')
+                            yield f"data: [LATEX_DOCUMENT:{encoded_latex}]\n\n"
+
                     result = execute_tool(tool_block.name, tool_block.input)
                     tool_results.append({
                         "type": "tool_result",

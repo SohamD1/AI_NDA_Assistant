@@ -48,8 +48,22 @@ function App() {
       setTimeout(() => setToolStatus(null), 1500)
       return null
     }
+    // Handle LaTeX document from generate_document or apply_edits tool
+    if (token.startsWith('[LATEX_DOCUMENT:')) {
+      const base64Content = token.slice(16, -1)
+      try {
+        // Decode base64 to get the LaTeX content
+        const latexContent = atob(base64Content)
+        console.log('Received LaTeX document, length:', latexContent.length)
+        setPreviousDocument(currentDocument)
+        setCurrentDocument(latexContent)
+      } catch (e) {
+        console.error('Failed to decode LaTeX content:', e)
+      }
+      return null
+    }
     return token
-  }, [])
+  }, [currentDocument])
 
   // Extract document from assistant message
   const extractDocument = useCallback((content) => {
@@ -216,47 +230,144 @@ function App() {
     )
   }
 
-  // Format message content with markdown-like rendering
-  const formatContent = (content) => {
-    // Simple markdown formatting
-    return content
-      .split('\n')
-      .map((line, i) => {
-        // Headers
-        if (line.startsWith('# ')) {
-          return <h3 key={i}>{line.slice(2)}</h3>
-        }
-        if (line.startsWith('## ')) {
-          return <h4 key={i}>{line.slice(3)}</h4>
-        }
-        if (line.startsWith('### ')) {
-          return <h5 key={i}>{line.slice(4)}</h5>
-        }
-        // Bold
-        if (line.includes('**')) {
-          const parts = line.split(/\*\*(.*?)\*\*/g)
-          return (
-            <p key={i}>
-              {parts.map((part, j) =>
-                j % 2 === 1 ? <strong key={j}>{part}</strong> : part
-              )}
-            </p>
-          )
-        }
-        // Lists
-        if (line.startsWith('- ') || line.startsWith('* ')) {
-          return <li key={i}>{line.slice(2)}</li>
-        }
-        if (line.match(/^\d+\. /)) {
-          return <li key={i}>{line.replace(/^\d+\. /, '')}</li>
-        }
-        // Code blocks
-        if (line.startsWith('```')) {
-          return null
-        }
-        // Regular text
-        return line ? <p key={i}>{line}</p> : <br key={i} />
-      })
+  // Generate PDF from the rendered document
+  const downloadAsPDF = async () => {
+    if (!currentDocument) return
+
+    // Create a hidden iframe to render the document
+    const printWindow = window.open('', '_blank')
+    if (!printWindow) {
+      alert('Please allow popups to download PDF')
+      return
+    }
+
+    // Parse LaTeX to HTML for printing
+    const parseLatexForPrint = (tex) => {
+      let html = tex
+      // Remove preamble
+      html = html.replace(/\\documentclass[^]*?\\begin\{document\}/s, '')
+      html = html.replace(/\\end\{document\}/g, '')
+      html = html.replace(/\\usepackage[^\n]*/g, '')
+
+      // Remove table/tabular environments and their column specs like {p{3in}p{3in}}
+      html = html.replace(/\\begin\{tabular\}\{[^}]*\}/g, '')
+      html = html.replace(/\\end\{tabular\}/g, '')
+      html = html.replace(/\\begin\{table\}[^]*?\\end\{table\}/gs, '')
+      html = html.replace(/\{p\{[^}]+\}[^}]*\}/g, '') // Remove {p{3in}p{3in}} style specs
+      html = html.replace(/\{[lcr|]+\}/g, '') // Remove {lll} or {|c|c|} column specs
+
+      // Remove other environments we don't need
+      html = html.replace(/\\begin\{minipage\}[^]*?\\end\{minipage\}/gs, '')
+      html = html.replace(/\\begin\{flushright\}([^]*?)\\end\{flushright\}/g, '<div style="text-align:right">$1</div>')
+      html = html.replace(/\\begin\{flushleft\}([^]*?)\\end\{flushleft\}/g, '<div style="text-align:left">$1</div>')
+
+      // Title handling
+      html = html.replace(/\\title\{([^}]+)\}/g, '<h1>$1</h1>')
+      html = html.replace(/\\maketitle/g, '')
+      html = html.replace(/\\begin\{center\}([^]*?)\\end\{center\}/g, '<div style="text-align:center">$1</div>')
+      html = html.replace(/\{\\Large\\bfseries\s*([^}]+)\}/g, '<h1>$1</h1>')
+      html = html.replace(/\{\\large\\bfseries\s*([^}]+)\}/g, '<h2>$1</h2>')
+      html = html.replace(/\\textbf\{\\Large\s*([^}]+)\}/g, '<h1>$1</h1>')
+
+      // Sections
+      html = html.replace(/\\section\*?\{([^}]+)\}/g, '<h2>$1</h2>')
+      html = html.replace(/\\subsection\*?\{([^}]+)\}/g, '<h3>$1</h3>')
+
+      // Text formatting
+      html = html.replace(/\\textbf\{([^}]+)\}/g, '<strong>$1</strong>')
+      html = html.replace(/\\textit\{([^}]+)\}/g, '<em>$1</em>')
+      html = html.replace(/\\underline\{([^}]+)\}/g, '<u>$1</u>')
+      html = html.replace(/\\emph\{([^}]+)\}/g, '<em>$1</em>')
+
+      // Lists
+      html = html.replace(/\\begin\{itemize\}/g, '<ul>')
+      html = html.replace(/\\end\{itemize\}/g, '</ul>')
+      html = html.replace(/\\begin\{enumerate\}/g, '<ol>')
+      html = html.replace(/\\end\{enumerate\}/g, '</ol>')
+      html = html.replace(/\\item\s*/g, '<li>')
+
+      // Spacing
+      html = html.replace(/\\vspace\{[^}]+\}/g, '<div style="height:20px"></div>')
+      html = html.replace(/\\hspace\{[^}]+\}/g, '&nbsp;&nbsp;')
+      html = html.replace(/\\hfill/g, '')
+      html = html.replace(/\\noindent\s*/g, '')
+      html = html.replace(/\\par\s*/g, '</p><p>')
+      html = html.replace(/\\bigskip/g, '<br><br>')
+      html = html.replace(/\\medskip/g, '<br>')
+      html = html.replace(/\\smallskip/g, '')
+      html = html.replace(/\\newline/g, '<br>')
+      html = html.replace(/\\\\\s*/g, '<br>')
+
+      // Rules/lines
+      html = html.replace(/\\rule\{([^}]+)\}\{[^}]+\}/g, '<hr style="width:$1;border:none;border-top:1px solid #111">')
+      html = html.replace(/\\hrulefill/g, '<hr>')
+
+      // Special characters
+      html = html.replace(/\\&/g, '&amp;')
+      html = html.replace(/\\%/g, '%')
+      html = html.replace(/\\\$/g, '$')
+      html = html.replace(/\\_/g, '_')
+      html = html.replace(/\\#/g, '#')
+      html = html.replace(/\\ldots/g, '...')
+      html = html.replace(/---/g, '—')
+      html = html.replace(/--/g, '–')
+      html = html.replace(/``/g, '"')
+      html = html.replace(/''/g, '"')
+
+      // Clean up remaining LaTeX commands and braces
+      html = html.replace(/\\[a-zA-Z]+\[[^\]]*\]\{[^}]*\}/g, '') // commands with optional args
+      html = html.replace(/\\[a-zA-Z]+\{[^}]*\}/g, '') // commands with args
+      html = html.replace(/\\[a-zA-Z]+/g, '') // commands without args
+      html = html.replace(/\{([^{}]*)\}/g, '$1') // remove remaining braces but keep content
+
+      // Paragraphs
+      html = html.replace(/\n\s*\n/g, '</p><p>')
+
+      // Clean up empty tags and extra whitespace
+      html = html.replace(/<p>\s*<\/p>/g, '')
+      html = html.replace(/\s+/g, ' ')
+
+      return '<p>' + html + '</p>'
+    }
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>NDA Document</title>
+        <style>
+          body {
+            font-family: 'Times New Roman', Georgia, serif;
+            padding: 40px 60px;
+            background: white;
+            color: #111;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            font-size: 12pt;
+          }
+          h1 { text-align: center; font-size: 18pt; font-weight: bold; margin-bottom: 24px; text-transform: uppercase; border-bottom: 2px solid #111; padding-bottom: 10px; }
+          h2 { font-size: 14pt; font-weight: bold; margin-top: 24px; margin-bottom: 12px; }
+          h3 { font-size: 12pt; font-weight: bold; margin-top: 16px; margin-bottom: 8px; }
+          p { margin: 12px 0; text-align: justify; }
+          ul, ol { margin: 12px 0; padding-left: 24px; }
+          li { margin: 6px 0; }
+          @media print {
+            body { padding: 20px; }
+          }
+        </style>
+      </head>
+      <body>
+        ${parseLatexForPrint(currentDocument)}
+      </body>
+      </html>
+    `)
+    printWindow.document.close()
+
+    // Wait for content to load then print
+    setTimeout(() => {
+      printWindow.print()
+    }, 250)
   }
 
   return (
@@ -306,7 +417,7 @@ function App() {
                   <span className="role">{msg.role === 'user' ? 'You' : 'LexiDoc'}</span>
                 </div>
                 <div className="message-content">
-                  {msg.role === 'assistant' ? formatContent(msg.content) : msg.content}
+                  {msg.content}
                   {msg.role === 'assistant' && isStreaming && idx === messages.length - 1 && (
                     <span className="cursor">▌</span>
                   )}
@@ -365,11 +476,171 @@ function App() {
             ) : showDiff ? (
               renderDiff()
             ) : (
-              <pre className="document-preview">
-                {currentDocument}
-                <div ref={documentEndRef} />
-              </pre>
+              <iframe
+                title="Document Preview"
+                className="latex-preview-frame"
+                srcDoc={`
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                    <style>
+                      body {
+                        font-family: 'Times New Roman', Georgia, serif;
+                        padding: 40px 50px;
+                        background: white;
+                        color: #111;
+                        line-height: 1.6;
+                        max-width: 800px;
+                        margin: 0 auto;
+                        font-size: 12pt;
+                      }
+                      h1 {
+                        text-align: center;
+                        font-size: 18pt;
+                        font-weight: bold;
+                        margin-bottom: 24px;
+                        text-transform: uppercase;
+                        border-bottom: 2px solid #111;
+                        padding-bottom: 10px;
+                      }
+                      h2 {
+                        font-size: 14pt;
+                        font-weight: bold;
+                        margin-top: 24px;
+                        margin-bottom: 12px;
+                        text-transform: uppercase;
+                      }
+                      h3 {
+                        font-size: 12pt;
+                        font-weight: bold;
+                        margin-top: 16px;
+                        margin-bottom: 8px;
+                      }
+                      p {
+                        margin: 12px 0;
+                        text-align: justify;
+                      }
+                      ul, ol {
+                        margin: 12px 0;
+                        padding-left: 24px;
+                      }
+                      li {
+                        margin: 6px 0;
+                      }
+                      .signature-block {
+                        margin-top: 40px;
+                        display: flex;
+                        justify-content: space-between;
+                      }
+                      .signature-line {
+                        width: 45%;
+                      }
+                      .signature-line hr {
+                        border: none;
+                        border-top: 1px solid #111;
+                        margin: 30px 0 5px 0;
+                      }
+                      .center {
+                        text-align: center;
+                      }
+                      .bold {
+                        font-weight: bold;
+                      }
+                      pre {
+                        white-space: pre-wrap;
+                        font-family: 'Times New Roman', Georgia, serif;
+                        font-size: 12pt;
+                      }
+                    </style>
+                  </head>
+                  <body>
+                    <div id="content"></div>
+                    <script>
+                      const latex = ${JSON.stringify(currentDocument)};
+
+                      function parseLatex(tex) {
+                        let html = tex;
+
+                        // Remove document class and preamble
+                        html = html.replace(/\\\\documentclass[^]*?\\\\begin\\{document\\}/s, '');
+                        html = html.replace(/\\\\end\\{document\\}/g, '');
+                        html = html.replace(/\\\\usepackage[^\\n]*/g, '');
+
+                        // Title - handle various formats
+                        html = html.replace(/\\\\title\\{([^}]+)\\}/g, '<h1>$1</h1>');
+                        html = html.replace(/\\\\maketitle/g, '');
+                        html = html.replace(/\\\\begin\\{center\\}([^]*?)\\\\end\\{center\\}/g, '<div class="center">$1</div>');
+                        html = html.replace(/\\{\\\\Large\\\\bfseries\\s*([^}]+)\\}/g, '<h1>$1</h1>');
+                        html = html.replace(/\\{\\\\large\\\\bfseries\\s*([^}]+)\\}/g, '<h2>$1</h2>');
+                        html = html.replace(/\\\\textbf\\{\\\\Large\\s*([^}]+)\\}/g, '<h1>$1</h1>');
+
+                        // Sections
+                        html = html.replace(/\\\\section\\*?\\{([^}]+)\\}/g, '<h2>$1</h2>');
+                        html = html.replace(/\\\\subsection\\*?\\{([^}]+)\\}/g, '<h3>$1</h3>');
+
+                        // Text formatting
+                        html = html.replace(/\\\\textbf\\{([^}]+)\\}/g, '<strong>$1</strong>');
+                        html = html.replace(/\\\\textit\\{([^}]+)\\}/g, '<em>$1</em>');
+                        html = html.replace(/\\\\underline\\{([^}]+)\\}/g, '<u>$1</u>');
+                        html = html.replace(/\\\\emph\\{([^}]+)\\}/g, '<em>$1</em>');
+
+                        // Lists
+                        html = html.replace(/\\\\begin\\{itemize\\}/g, '<ul>');
+                        html = html.replace(/\\\\end\\{itemize\\}/g, '</ul>');
+                        html = html.replace(/\\\\begin\\{enumerate\\}/g, '<ol>');
+                        html = html.replace(/\\\\end\\{enumerate\\}/g, '</ol>');
+                        html = html.replace(/\\\\item\\s*/g, '<li>');
+
+                        // Spacing and formatting
+                        html = html.replace(/\\\\vspace\\{[^}]+\\}/g, '<div style="height:20px"></div>');
+                        html = html.replace(/\\\\hspace\\{[^}]+\\}/g, '&nbsp;&nbsp;');
+                        html = html.replace(/\\\\hfill/g, '<span style="float:right">');
+                        html = html.replace(/\\\\noindent\\s*/g, '');
+                        html = html.replace(/\\\\par\\s*/g, '</p><p>');
+                        html = html.replace(/\\\\bigskip/g, '<br><br>');
+                        html = html.replace(/\\\\medskip/g, '<br>');
+                        html = html.replace(/\\\\smallskip/g, '');
+                        html = html.replace(/\\\\newline/g, '<br>');
+                        html = html.replace(/\\\\\\\\\\s*/g, '<br>');
+
+                        // Rules/lines for signatures
+                        html = html.replace(/\\\\rule\\{([^}]+)\\}\\{[^}]+\\}/g, '<hr style="width:$1;display:inline-block;border:none;border-top:1px solid #111">');
+                        html = html.replace(/\\\\hrulefill/g, '<hr>');
+
+                        // Special characters
+                        html = html.replace(/\\\\&/g, '&amp;');
+                        html = html.replace(/\\\\%/g, '%');
+                        html = html.replace(/\\\\\\$/g, '$');
+                        html = html.replace(/\\\\_/g, '_');
+                        html = html.replace(/\\\\#/g, '#');
+                        html = html.replace(/\\\\ldots/g, '...');
+                        html = html.replace(/---/g, '—');
+                        html = html.replace(/--/g, '–');
+                        html = html.replace(/\`\`/g, '"');
+                        html = html.replace(/''/g, '"');
+
+                        // Clean up remaining LaTeX commands
+                        html = html.replace(/\\\\[a-zA-Z]+\\{[^}]*\\}/g, '');
+                        html = html.replace(/\\\\[a-zA-Z]+/g, '');
+
+                        // Convert double newlines to paragraphs
+                        html = html.replace(/\\n\\s*\\n/g, '</p><p>');
+
+                        return '<p>' + html + '</p>';
+                      }
+
+                      try {
+                        document.getElementById('content').innerHTML = parseLatex(latex);
+                      } catch(e) {
+                        document.getElementById('content').innerHTML = '<pre>' + latex + '</pre>';
+                      }
+                    </script>
+                  </body>
+                  </html>
+                `}
+              />
             )}
+            <div ref={documentEndRef} />
           </div>
 
           {currentDocument && (
@@ -381,21 +652,13 @@ function App() {
                 }}
                 className="action-btn"
               >
-                Copy Document
+                Copy LaTeX
               </button>
               <button
-                onClick={() => {
-                  const blob = new Blob([currentDocument], { type: 'text/plain' })
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url
-                  a.download = 'legal-document.txt'
-                  a.click()
-                  URL.revokeObjectURL(url)
-                }}
-                className="action-btn"
+                onClick={downloadAsPDF}
+                className="action-btn primary"
               >
-                Download
+                Download PDF
               </button>
             </div>
           )}
