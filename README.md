@@ -1,4 +1,4 @@
-# LexiDoc - AI NDA Document Assistant
+AI NDA Document Assistant
 
 A full-stack chat interface that uses **streaming SSE responses**, **LLM function calling**, and **prompt engineering** to help users generate Non-Disclosure Agreements through conversation.
 
